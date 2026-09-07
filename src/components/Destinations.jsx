@@ -166,9 +166,76 @@ const categories = ['Flights', 'Departures', 'Umrah', 'Visa', 'Stamping'];
 const Destinations = () => {
   const [activeCategory, setActiveCategory] = useState('Flights');
   const [selectedCard, setSelectedCard] = useState(null);
+  const [destinations, setDestinations] = useState(curatedDestinations);
   const navigate = useNavigate();
 
-  const destinations = curatedDestinations;
+  useEffect(() => {
+    const mergeWithCurated = (rawList) => {
+      if (!Array.isArray(rawList) || rawList.length === 0) return curatedDestinations;
+      const curatedMap = new Map();
+      curatedDestinations.forEach(c => curatedMap.set(c.code, c));
+
+      const merged = rawList.map(item => {
+        const matching = curatedMap.get(item.code);
+        if (matching) {
+          curatedMap.delete(item.code);
+          return {
+            ...matching,
+            ...item,
+            id: item.id || matching.id,
+            landmark: item.landmark || matching.landmark,
+            desc: item.description || item.desc || matching.desc,
+            price: item.price || matching.price,
+            image_url: item.image_url || matching.image_url,
+            keralaOrigin: item.kerala_origin || matching.keralaOrigin,
+            keralaCode: item.keralaCode || matching.keralaCode
+          };
+        }
+        return item;
+      });
+
+      curatedMap.forEach(rem => {
+        merged.push(rem);
+      });
+
+      return merged.filter(d => d.is_active !== false);
+    };
+
+    // 1. Check local storage first
+    try {
+      const cached = localStorage.getItem('aashmi_destinations');
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setDestinations(mergeWithCurated(parsed));
+        }
+      }
+    } catch (e) {
+      console.warn("Cached destinations load note:", e);
+    }
+
+    // 2. Query Supabase
+    const fetchLive = async () => {
+      try {
+        const { data, error } = await supabase.from('destinations').select('*').order('created_at', { ascending: false });
+        if (!error && data && data.length > 0) {
+          setDestinations(mergeWithCurated(data));
+          localStorage.setItem('aashmi_destinations', JSON.stringify(data));
+        }
+      } catch (e) {
+        console.warn("Live destinations load note:", e);
+      }
+    };
+    fetchLive();
+  }, []);
+
+  const getOrigin = (dest) => dest?.keralaOrigin || dest?.kerala_origin || 'Kozhikode (CCJ)';
+  const getOriginCode = (dest) => {
+    if (dest?.keralaCode) return dest.keralaCode;
+    const origin = getOrigin(dest);
+    const m = origin.match(/\(([A-Z]{3})\)/);
+    return m ? m[1] : 'CCJ';
+  };
 
   const handleCardClick = (dest) => {
     setSelectedCard(dest);
@@ -177,7 +244,7 @@ const Destinations = () => {
   const handleBookNow = (dest) => {
     navigate('/flight-results', {
       state: {
-        from: dest.keralaOrigin,
+        from: getOrigin(dest),
         to: `${dest.city} (${dest.code})`,
         city: dest.city,
         country: dest.country,
@@ -242,7 +309,7 @@ const Destinations = () => {
               <div className="z-10 flex items-center justify-between w-full">
                 <span className="inline-flex items-center gap-1 bg-black/60 backdrop-blur-md text-white text-[10px] font-bold px-2.5 py-1 rounded-full border border-white/20 shadow-sm">
                   <span className="material-symbols-outlined text-[12px] text-secondary-fixed">flight_takeoff</span>
-                  From {dest.keralaCode}
+                  From {getOriginCode(dest)}
                 </span>
                 <span className="bg-primary/90 text-white text-[10px] font-extrabold px-2 py-0.5 rounded-md shadow-sm">
                   {dest.code}
@@ -253,7 +320,7 @@ const Destinations = () => {
               <div className="z-10 flex flex-col w-full">
                 <p className="text-secondary-fixed text-[11px] font-semibold tracking-wide mb-0.5 flex items-center gap-1">
                   <span className="material-symbols-outlined text-[13px]">location_on</span>
-                  {dest.landmark}
+                  {dest.landmark || dest.city}
                 </p>
                 <h3 className="text-white font-bold text-[20px] sm:text-[22px] tracking-tight leading-tight mb-2 group-hover:text-secondary-fixed transition-colors">
                   {dest.country}
@@ -268,7 +335,7 @@ const Destinations = () => {
                   <button
                     onClick={(e) => { e.stopPropagation(); handleBookNow(dest); }}
                     className="w-9 h-9 rounded-full bg-primary hover:bg-primary/90 text-white flex items-center justify-center transition-all duration-300 shadow-md hover:scale-110 active:scale-95"
-                    title={`Book flights from ${dest.keralaOrigin} to ${dest.country}`}
+                    title={`Book flights from ${getOrigin(dest)} to ${dest.country}`}
                   >
                     <span className="material-symbols-outlined text-[16px]">arrow_forward</span>
                   </button>
@@ -296,7 +363,7 @@ const Destinations = () => {
               <div className="flex justify-between items-center z-10 relative">
                 <span className="bg-primary text-white text-[10px] font-bold tracking-widest uppercase px-3 py-1 rounded-full shadow-md flex items-center gap-1">
                   <span className="material-symbols-outlined text-[13px]">flight_takeoff</span>
-                  Direct From {selectedCard.keralaOrigin}
+                  Direct From {getOrigin(selectedCard)}
                 </span>
                 <button onClick={closeDetail} className="material-symbols-outlined text-white/80 hover:text-white bg-black/40 hover:bg-black/60 rounded-full p-1.5 transition-colors">close</button>
               </div>
@@ -304,13 +371,13 @@ const Destinations = () => {
               <div className="mt-8 z-10 relative">
                 <p className="text-secondary-fixed text-xs font-bold tracking-wide flex items-center gap-1 mb-1">
                   <span className="material-symbols-outlined text-[14px]">location_on</span>
-                  {selectedCard.landmark}
+                  {selectedCard.landmark || selectedCard.city}
                 </p>
                 <h2 className="text-white font-headline-xl text-[32px] font-extrabold tracking-tight leading-none">
                   {selectedCard.country}
                 </h2>
                 <p className="text-white/70 text-[12px] font-medium mt-1">
-                  {selectedCard.city} ({selectedCard.code}) • {selectedCard.desc}
+                  {selectedCard.city} ({selectedCard.code}) {selectedCard.desc || selectedCard.description ? `• ${selectedCard.desc || selectedCard.description}` : ''}
                 </p>
               </div>
             </div>
@@ -323,7 +390,7 @@ const Destinations = () => {
                   <p className="text-label-caps font-label-caps text-outline uppercase font-semibold">Origin (Kerala)</p>
                   <p className="font-bold text-body-md text-primary dark:text-secondary-fixed mt-1 flex items-center gap-1">
                     <span className="material-symbols-outlined text-[16px]">flight_takeoff</span>
-                    {selectedCard.keralaOrigin}
+                    {getOrigin(selectedCard)}
                   </p>
                 </div>
                 <div>

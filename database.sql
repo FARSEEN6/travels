@@ -117,3 +117,20 @@ ALTER TABLE public.registered_users ENABLE ROW LEVEL SECURITY;
 CREATE POLICY "Allow public read access on registered_users" ON public.registered_users FOR SELECT USING (true);
 CREATE POLICY "Allow public insert access on registered_users" ON public.registered_users FOR INSERT WITH CHECK (true);
 CREATE POLICY "Allow public update access on registered_users" ON public.registered_users FOR UPDATE USING (true);
+
+-- 11. New fields for Destinations (Add/Edit Country feature)
+ALTER TABLE public.destinations ADD COLUMN IF NOT EXISTS description TEXT;
+ALTER TABLE public.destinations ADD COLUMN IF NOT EXISTS highlights TEXT;
+ALTER TABLE public.destinations ADD COLUMN IF NOT EXISTS visa_info TEXT;
+ALTER TABLE public.destinations ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT true;
+ALTER TABLE public.destinations ADD COLUMN IF NOT EXISTS landmark TEXT;
+ALTER TABLE public.destinations ADD COLUMN IF NOT EXISTS kerala_origin TEXT DEFAULT 'Kozhikode (CCJ)';
+
+-- 12. New fields for Registered Users (Address & Location)
+ALTER TABLE public.registered_users ADD COLUMN IF NOT EXISTS address TEXT;
+ALTER TABLE public.registered_users ADD COLUMN IF NOT EXISTS city TEXT;
+ALTER TABLE public.registered_users ADD COLUMN IF NOT EXISTS state TEXT;
+ALTER TABLE public.registered_users ADD COLUMN IF NOT EXISTS country TEXT;
+ALTER TABLE public.registered_users ADD COLUMN IF NOT EXISTS pin_code TEXT;
+ALTER TABLE public.registered_users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN DEFAULT false;
+
