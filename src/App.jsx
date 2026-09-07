@@ -38,6 +38,35 @@ const ProtectedRoute = ({ children }) => {
   return children;
 };
 
+// Admin Route — only allows admin users, redirects others to /
+const AdminRoute = ({ children }) => {
+  const { isRegistered, isAdmin, loading } = useAuth();
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-[#072a34] via-[#0a3d4d] to-[#11A8CD] flex items-center justify-center">
+        <div className="flex flex-col items-center gap-4">
+          <div className="relative w-16 h-16">
+            <div className="absolute inset-0 rounded-full border-4 border-cyan-400/20"></div>
+            <div className="absolute inset-0 rounded-full border-4 border-transparent border-t-cyan-400 animate-spin"></div>
+          </div>
+          <p className="text-cyan-200/70 text-sm font-medium">Loading...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!isRegistered) {
+    return <Navigate to="/register" replace />;
+  }
+
+  if (!isAdmin) {
+    return <Navigate to="/" replace />;
+  }
+
+  return children;
+};
+
 // Register Route — redirects to / if already registered
 const RegisterRoute = () => {
   const { isRegistered, loading } = useAuth();
@@ -84,7 +113,7 @@ function AppContent() {
                   <Route path="/flight-results" element={<FlightResults />} />
                   <Route path="/import-pnr" element={<ImportPnr />} />
                   <Route path="/group-request" element={<GroupRequest />} />
-                  <Route path="/admin" element={<AdminDashboard />} />
+                  <Route path="/admin" element={<AdminRoute><AdminDashboard /></AdminRoute>} />
                 </Routes>
               </div>
               <Footer />

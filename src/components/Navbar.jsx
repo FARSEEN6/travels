@@ -4,7 +4,7 @@ import { useAuth } from '../context/AuthContext';
 
 const Navbar = () => {
   const [authDropdownOpen, setAuthDropdownOpen] = useState(false);
-  const { user, isRegistered, signOut } = useAuth();
+  const { user, isRegistered, isAdmin, signOut } = useAuth();
   const navigate = useNavigate();
 
   // Close dropdown when clicking outside
@@ -104,8 +104,15 @@ const Navbar = () => {
                   <p className="text-xs text-slate-500 font-mono truncate">
                     {user?.phone || user?.email}
                   </p>
-                  <div className="mt-2 inline-flex items-center gap-1 bg-emerald-100/80 text-emerald-800 text-[10px] font-bold px-2 py-0.5 rounded-full">
-                    <span>✓</span> {user?.id_type || 'PAN/Aadhaar'} & OTP Verified
+                  <div className="mt-2 flex items-center gap-1.5 flex-wrap">
+                    <span className="inline-flex items-center gap-1 bg-emerald-100/80 text-emerald-800 text-[10px] font-bold px-2 py-0.5 rounded-full">
+                      <span>✓</span> {user?.id_type || 'PAN/Aadhaar'} & OTP Verified
+                    </span>
+                    {isAdmin && (
+                      <span className="inline-flex items-center gap-1 bg-amber-100 text-amber-900 border border-amber-300 text-[10px] font-bold px-2 py-0.5 rounded-full">
+                        👑 Admin
+                      </span>
+                    )}
                   </div>
                 </div>
 
@@ -118,14 +125,16 @@ const Navbar = () => {
                   My Trips & Flights
                 </Link>
 
-                <Link
-                  to="/admin"
-                  onClick={() => setAuthDropdownOpen(false)}
-                  className="px-4 py-2.5 text-left text-sm font-semibold text-slate-700 hover:bg-slate-50 transition-colors w-full flex items-center gap-2.5"
-                >
-                  <span className="material-symbols-outlined text-[18px] text-slate-400">admin_panel_settings</span>
-                  Admin Panel
-                </Link>
+                {isAdmin && (
+                  <Link
+                    to="/admin"
+                    onClick={() => setAuthDropdownOpen(false)}
+                    className="px-4 py-2.5 text-left text-sm font-semibold text-amber-700 hover:bg-amber-50/60 transition-colors w-full flex items-center gap-2.5"
+                  >
+                    <span className="material-symbols-outlined text-[18px] text-amber-600">admin_panel_settings</span>
+                    Admin Panel
+                  </Link>
+                )}
 
                 <hr className="border-slate-100 my-1" />
 

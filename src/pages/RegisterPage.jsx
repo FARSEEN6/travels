@@ -1,1086 +1,608 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { supabase } from '../supabaseClient';
 
-// ─── Real PAN & Aadhaar Validation Helpers ──────────────────────────
-const PAN_REGEX = /^[A-Z]{5}[0-9]{4}[A-Z]$/;
+// ─── Google "G" SVG Icon ────────────────────────────────────────────
+const GoogleIcon = () => (
+  <svg className="w-5 h-5 flex-shrink-0" viewBox="0 0 24 24">
+    <path fill="#4285F4" d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17z" />
+    <path fill="#34A853" d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.1-6.72-4.93H1.25v3.15C3.26 21.36 7.34 24 12 24z" />
+    <path fill="#FBBC05" d="M5.28 14.27c-.25-.72-.38-1.49-.38-2.27s.13-1.55.38-2.27V6.58H1.25C.45 8.18 0 9.99 0 12s.45 3.82 1.25 5.42l4.03-3.15z" />
+    <path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.34 0 3.26 2.64 1.25 6.58l4.03 3.15c.95-2.83 3.6-4.98 6.72-4.98z" />
+  </svg>
+);
 
-const getPanEntity = (pan) => {
-  if (!pan || pan.length < 4) return null;
-  const fourth = pan[3].toUpperCase();
-  const types = {
-    P: 'Individual Taxpayer',
-    C: 'Company / Corporate',
-    H: 'Hindu Undivided Family (HUF)',
-    F: 'Firm / Partnership',
-    A: 'Association of Persons (AOP)',
-    T: 'Trust',
-    B: 'Body of Individuals',
-    L: 'Local Authority',
-    J: 'Artificial Juridical Person',
-    G: 'Government Agency',
-  };
-  return types[fourth] || 'Registered Taxpayer';
-};
-
-// Verhoeff checksum algorithm (used by UIDAI for official Aadhaar validation)
-const verhoeffTable = {
-  d: [
-    [0,1,2,3,4,5,6,7,8,9],[1,2,3,4,0,6,7,8,9,5],[2,3,4,0,1,7,8,9,5,6],
-    [3,4,0,1,2,8,9,5,6,7],[4,0,1,2,3,9,5,6,7,8],[5,9,8,7,6,0,4,3,2,1],
-    [6,5,9,8,7,1,0,4,3,2],[7,6,5,9,8,2,1,0,4,3],[8,7,6,5,9,3,2,1,0,4],
-    [9,8,7,6,5,4,3,2,1,0]
-  ],
-  p: [
-    [0,1,2,3,4,5,6,7,8,9],[1,5,7,6,2,8,3,0,9,4],[5,8,0,3,7,9,6,1,4,2],
-    [8,9,1,6,0,4,3,5,2,7],[9,4,5,3,1,2,6,8,7,0],[4,2,8,6,5,7,3,9,0,1],
-    [2,7,9,3,8,0,6,4,1,5],[7,0,4,6,9,1,3,2,5,8]
-  ],
-  inv: [0,4,3,2,1,5,6,7,8,9]
-};
-
-const validateAadhaar = (num) => {
-  const clean = num.replace(/\s/g, '');
-  if (!/^\d{12}$/.test(clean)) return false;
-  if (clean.startsWith('0') || clean.startsWith('1')) return false;
-  let c = 0;
-  const digits = clean.split('').map(Number).reverse();
-  for (let i = 0; i < digits.length; i++) {
-    c = verhoeffTable.d[c][verhoeffTable.p[i % 8][digits[i]]];
-  }
-  return c === 0;
-};
-
-// Helper for formatting Supabase errors cleanly
-const formatSupabaseError = (err, fallback) => {
-  const msg = err?.message || String(err || '');
-  if (msg.includes('Failed to fetch') || msg.includes('fetch') || msg.includes('NetworkError')) {
-    return 'Cannot connect to Supabase backend. Please verify your Supabase project is active and VITE_SUPABASE_URL in .env is correct.';
-  }
-  return msg || fallback;
-};
-
-// ─── 6-Digit OTP Box Component ──────────────────────────────────────
-const OtpInput = ({ length = 6, value, onChange, disabled }) => {
-  const inputRefs = useRef([]);
-
-  const handleChange = (index, e) => {
-    const val = e.target.value.replace(/\D/g, '');
-    if (!val && e.target.value !== '') return;
-
-    const chars = (value || '').split('');
-    chars[index] = val.slice(-1);
-    const joined = chars.join('').slice(0, length);
-    onChange(joined);
-
-    if (val && index < length - 1) {
-      inputRefs.current[index + 1]?.focus();
-    }
-  };
-
-  const handleKeyDown = (index, e) => {
-    if (e.key === 'Backspace' && (!value[index] || value[index] === '') && index > 0) {
-      inputRefs.current[index - 1]?.focus();
-    }
-  };
-
-  const handlePaste = (e) => {
-    e.preventDefault();
-    const pasted = e.clipboardData.getData('text').replace(/\D/g, '').slice(0, length);
-    if (pasted) {
-      onChange(pasted);
-      const targetIdx = Math.min(pasted.length, length - 1);
-      inputRefs.current[targetIdx]?.focus();
-    }
-  };
-
-  return (
-    <div className="flex gap-2 sm:gap-3 justify-center my-3">
-      {Array.from({ length }).map((_, i) => (
-        <input
-          key={i}
-          ref={(el) => (inputRefs.current[i] = el)}
-          type="text"
-          inputMode="numeric"
-          pattern="[0-9]*"
-          maxLength={1}
-          value={value[i] || ''}
-          onChange={(e) => handleChange(i, e)}
-          onKeyDown={(e) => handleKeyDown(i, e)}
-          onPaste={i === 0 ? handlePaste : undefined}
-          disabled={disabled}
-          autoFocus={i === 0}
-          className={`w-11 h-14 sm:w-12 sm:h-14 text-center text-xl sm:text-2xl font-bold rounded-xl border-2 transition-all duration-200 outline-none
-            ${disabled ? 'bg-gray-100 border-gray-200 text-gray-400' : 'bg-white border-slate-200 focus:border-primary focus:ring-4 focus:ring-primary/15 text-slate-800'}
-            ${value[i] ? 'border-primary bg-primary-light/40 shadow-sm' : ''}`}
-        />
-      ))}
+// ─── Shared Input Component ─────────────────────────────────────────
+const FormInput = ({ label, icon, error, ...props }) => (
+  <div>
+    {label && (
+      <label className="block text-xs font-bold text-slate-600 mb-1.5 tracking-wide">
+        {label}
+      </label>
+    )}
+    <div className="relative">
+      {icon && (
+        <span className="absolute left-3.5 top-1/2 -translate-y-1/2 material-symbols-outlined text-[18px] text-slate-400">
+          {icon}
+        </span>
+      )}
+      <input
+        {...props}
+        className={`w-full ${icon ? 'pl-10' : 'pl-4'} pr-4 py-2.5 rounded-xl border-2 bg-white text-sm text-slate-800 placeholder:text-slate-300 outline-none transition-all ${
+          error
+            ? 'border-red-300 focus:border-red-400 focus:ring-4 focus:ring-red-100'
+            : 'border-slate-200 focus:border-primary focus:ring-4 focus:ring-primary/15'
+        }`}
+      />
     </div>
-  );
-};
-
-// ─── Step Indicator ────────────────────────────────────────────────
-const StepIndicator = ({ currentStep, steps }) => {
-  return (
-    <div className="flex items-center justify-between mb-8 px-4 sm:px-8">
-      {steps.map((step, i) => {
-        const isCompleted = i < currentStep;
-        const isCurrent = i === currentStep;
-        return (
-          <React.Fragment key={i}>
-            <div className="flex flex-col items-center gap-1.5 relative">
-              <div
-                className={`w-10 h-10 rounded-full flex items-center justify-center text-sm font-bold transition-all duration-300 ${
-                  isCompleted
-                    ? 'bg-emerald-500 text-white shadow-md shadow-emerald-500/30'
-                    : isCurrent
-                    ? 'bg-primary text-white shadow-lg shadow-primary/30 ring-4 ring-primary/20 scale-105'
-                    : 'bg-slate-100 text-slate-400 border border-slate-200'
-                }`}
-              >
-                {isCompleted ? (
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
-                  </svg>
-                ) : (
-                  <span>{i + 1}</span>
-                )}
-              </div>
-              <span
-                className={`text-[11px] font-semibold tracking-wide transition-colors ${
-                  isCurrent ? 'text-primary' : isCompleted ? 'text-emerald-600' : 'text-slate-400'
-                }`}
-              >
-                {step}
-              </span>
-            </div>
-            {i < steps.length - 1 && (
-              <div
-                className={`flex-1 h-1 mx-2 sm:mx-4 rounded-full -mt-5 transition-all duration-500 ${
-                  i < currentStep ? 'bg-emerald-500' : 'bg-slate-200'
-                }`}
-              />
-            )}
-          </React.Fragment>
-        );
-      })}
-    </div>
-  );
-};
+    {error && <p className="text-[11px] text-red-500 mt-1 font-medium">{error}</p>}
+  </div>
+);
 
 // ═══════════════════════════════════════════════════════════════════
-// MAIN REGISTER PAGE COMPONENT (EMAIL VERIFICATION ONLY)
+// MAIN REGISTER PAGE
 // ═══════════════════════════════════════════════════════════════════
 const RegisterPage = () => {
   const navigate = useNavigate();
-  const { completeRegistration, findRegisteredUser, quickLogin } = useAuth();
+  const {
+    registerUser,
+    loginWithCredentials,
+    signInWithGoogle,
+    checkGoogleLogin,
+    findRegisteredUserByEmail,
+    quickLogin,
+  } = useAuth();
 
-  // Mode: 'register' or 'login'
-  const [authMode, setAuthMode] = useState('register');
+  // Tab: 'register' or 'login'
+  const [mode, setMode] = useState('register');
 
-  // Step index: 0=Identity, 1=Email OTP, 2=Profile Details
-  const [currentStep, setCurrentStep] = useState(0);
+  // ─── Register Form Fields ───
+  const [form, setForm] = useState({
+    firstName: '',
+    lastName: '',
+    email: '',
+    phone: '',
+    password: '',
+    confirmPassword: '',
+    address: '',
+    city: '',
+    state: '',
+    country: 'India',
+    pinCode: '',
+  });
+  const [fieldErrors, setFieldErrors] = useState({});
+  const [registerLoading, setRegisterLoading] = useState(false);
+  const [registerError, setRegisterError] = useState('');
 
-  // ── Step 1: ID Verification (PAN / Aadhaar) ──
-  const [idType, setIdType] = useState('PAN');
-  const [idNumber, setIdNumber] = useState('');
-  const [idVerified, setIdVerified] = useState(false);
-  const [idVerifying, setIdVerifying] = useState(false);
-  const [idVerifyStage, setIdVerifyStage] = useState('');
-  const [idError, setIdError] = useState('');
-
-  // ── Step 2: Email OTP (Real Email via Supabase) ──
-  const [email, setEmail] = useState('');
-  const [emailOtp, setEmailOtp] = useState('');
-  const [emailSent, setEmailSent] = useState(false);
-  const [emailVerified, setEmailVerified] = useState(false);
-  const [emailLoading, setEmailLoading] = useState(false);
-  const [emailError, setEmailError] = useState('');
-  const [emailTimer, setEmailTimer] = useState(0);
-
-  // ── Step 3: Personal Details ──
-  const [fullName, setFullName] = useState('');
-  const [phone, setPhone] = useState('');
-  const [homeCity, setHomeCity] = useState('');
-  const [agreeTerms, setAgreeTerms] = useState(true);
-  const [submitting, setSubmitting] = useState(false);
-  const [submitError, setSubmitError] = useState('');
-  const [successCelebration, setSuccessCelebration] = useState(false);
-
-  // ── Status Toast / Informational Banners ──
-  const [notification, setNotification] = useState(null);
-
-  // ── Login Mode States (Email Only) ──
+  // ─── Login Form Fields ───
   const [loginEmail, setLoginEmail] = useState('');
-  const [loginOtpSent, setLoginOtpSent] = useState(false);
-  const [loginOtpInput, setLoginOtpInput] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
   const [loginError, setLoginError] = useState('');
   const [loginLoading, setLoginLoading] = useState(false);
-  const [loginTimer, setLoginTimer] = useState(0);
+  const [googleLoading, setGoogleLoading] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+  const [showRegPasswords, setShowRegPasswords] = useState(false);
 
-  const stepNames = ['Identity', 'Email OTP', 'Profile'];
+  // ─── Success Modal ───
+  const [successCelebration, setSuccessCelebration] = useState(false);
+  const [successName, setSuccessName] = useState('');
 
-  // Countdown timers
+  // Check for Google OAuth callback on mount
   useEffect(() => {
-    if (emailTimer > 0) {
-      const t = setTimeout(() => setEmailTimer((prev) => prev - 1), 1000);
-      return () => clearTimeout(t);
-    }
-  }, [emailTimer]);
-
-  useEffect(() => {
-    if (loginTimer > 0) {
-      const t = setTimeout(() => setLoginTimer((prev) => prev - 1), 1000);
-      return () => clearTimeout(t);
-    }
-  }, [loginTimer]);
-
-  // ─────────────────────────────────────────────────────────────────
-  // STEP 1: VERIFY PAN / AADHAAR
-  // ─────────────────────────────────────────────────────────────────
-  const handleVerifyId = async () => {
-    setIdError('');
-    const raw = idNumber.trim().toUpperCase();
-
-    if (idType === 'PAN') {
-      if (!PAN_REGEX.test(raw)) {
-        setIdError('Invalid PAN format! Must be 5 letters, 4 numbers, 1 letter (e.g. ABCDE1234F).');
-        return;
-      }
-    } else {
-      const cleanAadhaar = idNumber.replace(/\s/g, '');
-      if (!/^\d{12}$/.test(cleanAadhaar)) {
-        setIdError('Aadhaar number must be exactly 12 digits.');
-        return;
-      }
-      if (cleanAadhaar.startsWith('0') || cleanAadhaar.startsWith('1')) {
-        setIdError('Invalid Aadhaar! UIDAI numbers cannot begin with 0 or 1.');
-        return;
-      }
-      if (!validateAadhaar(cleanAadhaar)) {
-        setIdError('Aadhaar Verhoeff Checksum failed. Please verify your 12-digit number.');
-        return;
-      }
-    }
-
-    setIdVerifying(true);
-    setIdVerifyStage(idType === 'PAN' ? 'Connecting to NSDL Tax Database...' : 'Connecting to UIDAI Central Server...');
-
-    setTimeout(() => {
-      setIdVerifyStage(idType === 'PAN' ? 'Validating Taxpayer Category...' : 'Verifying Demographic Hash...');
-    }, 900);
-
-    setTimeout(() => {
-      setIdVerifyStage(idType === 'PAN' ? 'Record Active & Verified ✅' : 'UID Authenticated & Linked ✅');
-    }, 1800);
-
-    setTimeout(() => {
-      setIdVerifying(false);
-      setIdVerified(true);
-      setTimeout(() => setCurrentStep(1), 700);
-    }, 2400);
-  };
-
-  // ─────────────────────────────────────────────────────────────────
-  // STEP 2: EMAIL OTP (REAL EMAIL VIA SUPABASE AUTH ONLY)
-  // ─────────────────────────────────────────────────────────────────
-  const handleSendEmailOtp = async () => {
-    setEmailError('');
-    const cleanEmail = email.trim().toLowerCase();
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(cleanEmail)) {
-      setEmailError('Please enter a valid email address (e.g. name@example.com).');
-      return;
-    }
-
-    setEmailLoading(true);
-
-    try {
-      const { error } = await supabase.auth.signInWithOtp({
-        email: cleanEmail,
-      });
-
-      if (error) {
-        setEmailError(formatSupabaseError(error, 'Failed to send Email OTP. Please check your email configuration in Supabase.'));
-      } else {
-        setEmailSent(true);
-        setEmailTimer(30);
-        setNotification({
-          type: 'email',
-          title: 'Real Email OTP Sent 📩',
-          message: `A 6-digit verification code has been sent directly to ${cleanEmail}. Please check your Inbox and Spam folder!`,
-        });
-      }
-    } catch (err) {
-      setEmailError(formatSupabaseError(err, 'Connection error while requesting email OTP. Please try again.'));
-    } finally {
-      setEmailLoading(false);
-    }
-  };
-
-  const handleVerifyEmailOtp = async () => {
-    setEmailError('');
-    if (emailOtp.length !== 6) {
-      setEmailError('Please enter the 6-digit email OTP.');
-      return;
-    }
-
-    setEmailLoading(true);
-
-    try {
-      const cleanEmail = email.trim().toLowerCase();
-      const { error } = await supabase.auth.verifyOtp({
-        email: cleanEmail,
-        token: emailOtp.trim(),
-        type: 'email',
-      });
-
-      if (error) {
-        setEmailError(formatSupabaseError(error, 'Verification failed: Incorrect Email OTP.'));
-      } else {
-        setEmailVerified(true);
-        setNotification(null);
-        setTimeout(() => setCurrentStep(2), 600);
-      }
-    } catch (err) {
-      setEmailError(formatSupabaseError(err, 'Incorrect Email OTP! Please check your inbox and try again.'));
-    } finally {
-      setEmailLoading(false);
-    }
-  };
-
-  // ─────────────────────────────────────────────────────────────────
-  // STEP 3: COMPLETE REGISTRATION
-  // ─────────────────────────────────────────────────────────────────
-  const handleSubmitRegistration = async () => {
-    setSubmitError('');
-    if (!fullName.trim()) {
-      setSubmitError('Please enter your full name as shown on your official ID.');
-      return;
-    }
-    if (!agreeTerms) {
-      setSubmitError('Please accept the Terms & Conditions and Travel Policy.');
-      return;
-    }
-
-    setSubmitting(true);
-    try {
-      await completeRegistration({
-        full_name: fullName.trim(),
-        email: email.trim().toLowerCase(),
-        phone: phone.trim() ? `+91 ${phone.replace(/\D/g, '')}` : '+91 Verified Member',
-        id_type: idType,
-        id_number: idType === 'PAN' ? idNumber.trim().toUpperCase() : idNumber.trim(),
-        home_city: homeCity.trim() || 'Kerala, India',
-      });
-
-      setSuccessCelebration(true);
-      setTimeout(() => {
-        navigate('/');
-      }, 1600);
-    } catch (err) {
-      setSubmitError(err.message || 'Registration failed. Please try again.');
-      setSubmitting(false);
-    }
-  };
-
-  // ─────────────────────────────────────────────────────────────────
-  // SIGN IN FLOW FOR ALREADY REGISTERED USERS (EMAIL ONLY)
-  // ─────────────────────────────────────────────────────────────────
-  const handleLoginSendOtp = async () => {
-    setLoginError('');
-    const cleanEmail = loginEmail.trim().toLowerCase();
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(cleanEmail)) {
-      setLoginError('Enter your registered Email Address (e.g. user@example.com).');
-      return;
-    }
-
-    const found = findRegisteredUser(cleanEmail);
-    if (!found) {
-      setLoginError('No account found with this email. Please switch to "New Registration" to create a profile.');
-      return;
-    }
-
-    setLoginLoading(true);
-
-    try {
-      const { error } = await supabase.auth.signInWithOtp({ email: cleanEmail });
-      if (error) {
-        setLoginError(formatSupabaseError(error, 'Failed to send login Email OTP.'));
-      } else {
-        setLoginOtpSent(true);
-        setLoginTimer(30);
-        setNotification({
-          type: 'email',
-          title: 'Real Login OTP Sent 📩',
-          message: `A 6-digit login OTP code was sent to ${cleanEmail}. Check your inbox.`,
-        });
-      }
-    } catch (err) {
-      setLoginError(formatSupabaseError(err, 'Network error while requesting login OTP. Please try again.'));
-    } finally {
-      setLoginLoading(false);
-    }
-  };
-
-  const handleLoginVerify = async () => {
-    setLoginError('');
-    if (loginOtpInput.length !== 6) {
-      setLoginError('Enter the 6-digit OTP code.');
-      return;
-    }
-
-    setLoginLoading(true);
-
-    try {
-      const cleanEmail = loginEmail.trim().toLowerCase();
-      const verifyRes = await supabase.auth.verifyOtp({
-        email: cleanEmail,
-        token: loginOtpInput.trim(),
-        type: 'email',
-      });
-
-      if (verifyRes.error) {
-        setLoginError(formatSupabaseError(verifyRes.error, 'Login verification failed: Invalid OTP code.'));
-      } else {
-        const found = findRegisteredUser(cleanEmail);
-        if (found) {
-          quickLogin(found);
-          navigate('/');
+    const checkGoogleCallback = async () => {
+      const urlParams = new URLSearchParams(window.location.hash?.replace('#', '?'));
+      if (urlParams.get('access_token') || window.location.hash.includes('access_token')) {
+        setGoogleLoading(true);
+        // Give Supabase a moment to process
+        await new Promise(r => setTimeout(r, 800));
+        const profile = await checkGoogleLogin();
+        if (profile) {
+          setSuccessName(profile.full_name || profile.first_name || 'Traveler');
+          setSuccessCelebration(true);
+          setTimeout(() => {
+            quickLogin(profile);
+            navigate('/');
+          }, 1400);
         } else {
-          const sessionUser = verifyRes.data?.user;
-          quickLogin({
-            id: sessionUser?.id || 'usr_' + Date.now(),
-            full_name: sessionUser?.email?.split('@')[0] || 'Aashmi Member',
-            email: sessionUser?.email || cleanEmail,
-            phone: '',
-            id_type: 'PAN',
-            id_number: 'VERIFIED',
-            id_verified: true,
-            phone_verified: true,
-            email_verified: true,
-          });
-          navigate('/');
+          setMode('login');
+          setLoginError('This Google account is not registered yet. Please register first, then use Google Sign-In.');
+          // Sign out the unregistered Google session
+          try {
+            await supabase.auth.signOut();
+          } catch {}
         }
+        setGoogleLoading(false);
       }
+    };
+    checkGoogleCallback();
+  }, []);
+
+  // Form change handler
+  const updateForm = (field, value) => {
+    setForm(prev => ({ ...prev, [field]: value }));
+    setFieldErrors(prev => ({ ...prev, [field]: '' }));
+    setRegisterError('');
+  };
+
+  // ─── REGISTER ─────────────────────────────────────────────────────
+  const handleRegister = async (e) => {
+    e.preventDefault();
+    setRegisterError('');
+    const errors = {};
+
+    if (!form.firstName.trim()) errors.firstName = 'First name is required';
+    if (!form.lastName.trim()) errors.lastName = 'Last name is required';
+    if (!form.email.trim()) {
+      errors.email = 'Email is required';
+    } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email.trim())) {
+      errors.email = 'Enter a valid email address';
+    } else {
+      // Check if email already exists
+      const existing = findRegisteredUserByEmail(form.email.trim());
+      if (existing) {
+        errors.email = 'This email is already registered. Please sign in instead.';
+      }
+    }
+    if (!form.phone.trim()) {
+      errors.phone = 'Mobile number is required';
+    } else if (!/^\d{10}$/.test(form.phone.replace(/\D/g, ''))) {
+      errors.phone = 'Enter a valid 10-digit mobile number';
+    }
+    if (!form.password) {
+      errors.password = 'Password is required';
+    } else if (form.password.length < 6) {
+      errors.password = 'Password must be at least 6 characters';
+    }
+    if (form.password !== form.confirmPassword) {
+      errors.confirmPassword = 'Passwords do not match';
+    }
+    if (!form.address.trim()) errors.address = 'Address is required';
+    if (!form.city.trim()) errors.city = 'City is required';
+    if (!form.state.trim()) errors.state = 'State is required';
+    if (!form.country.trim()) errors.country = 'Country is required';
+    if (!form.pinCode.trim()) {
+      errors.pinCode = 'PIN Code is required';
+    } else if (!/^\d{4,6}$/.test(form.pinCode.replace(/\D/g, ''))) {
+      errors.pinCode = 'Enter a valid PIN / ZIP code';
+    }
+
+    if (Object.keys(errors).length > 0) {
+      setFieldErrors(errors);
+      return;
+    }
+
+    setRegisterLoading(true);
+    try {
+      const newUser = await registerUser(form);
+      setSuccessName(newUser.full_name || form.firstName);
+      setSuccessCelebration(true);
+      setTimeout(() => navigate('/'), 1500);
     } catch (err) {
-      setLoginError(formatSupabaseError(err, 'Incorrect login OTP. Please check the code and try again.'));
+      setRegisterError(err.message || 'Registration failed. Please try again.');
     } finally {
-      setLoginLoading(false);
+      setRegisterLoading(false);
+    }
+  };
+
+  // ─── LOGIN WITH EMAIL + PASSWORD ──────────────────────────────────
+  const handleLogin = (e) => {
+    e.preventDefault();
+    setLoginError('');
+
+    if (!loginEmail.trim() || !loginPassword) {
+      setLoginError('Please enter your email and password.');
+      return;
+    }
+
+    setLoginLoading(true);
+    const result = loginWithCredentials(loginEmail.trim().toLowerCase(), loginPassword);
+    if (result.success) {
+      setSuccessName(loginEmail.split('@')[0]);
+      setSuccessCelebration(true);
+      setTimeout(() => navigate('/'), 1400);
+    } else {
+      setLoginError(result.error);
+    }
+    setLoginLoading(false);
+  };
+
+  // ─── LOGIN WITH GOOGLE ───────────────────────────────────────────
+  const handleGoogleLogin = async () => {
+    setLoginError('');
+    setGoogleLoading(true);
+    try {
+      const { error } = await signInWithGoogle();
+      if (error) {
+        if (
+          error.message?.includes('provider is not enabled') ||
+          error.message?.includes('Unsupported provider') ||
+          error.message?.includes('validation failed')
+        ) {
+          setLoginError(
+            'Google Sign-In is not enabled in the Supabase Dashboard yet. Go to Supabase → Authentication → Providers → Google and enable it.'
+          );
+        } else {
+          setLoginError(error.message || 'Google Sign-In failed.');
+        }
+        setGoogleLoading(false);
+      }
+      // If no error, Supabase will redirect to Google — don't reset loading
+    } catch (err) {
+      setLoginError('Connection error. Please try again.');
+      setGoogleLoading(false);
     }
   };
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-[#051c24] via-[#093542] to-[#11A8CD] flex items-center justify-center p-3 sm:p-6 relative overflow-hidden font-body-md selection:bg-primary selection:text-white">
-      {/* Background Animated Atmosphere */}
+      {/* Animated Background */}
       <div className="absolute inset-0 overflow-hidden pointer-events-none">
         <div className="absolute -top-32 -left-32 w-[450px] h-[450px] bg-cyan-400/10 rounded-full blur-[100px] animate-float" />
         <div className="absolute -bottom-40 -right-40 w-[550px] h-[550px] bg-emerald-400/10 rounded-full blur-[120px] animate-float-delayed" />
         <div className="absolute top-1/2 left-1/3 w-80 h-80 bg-primary/10 rounded-full blur-[90px] animate-float-slow" />
       </div>
 
-      {/* ─── REALISTIC STATUS NOTIFICATION TOAST ─── */}
-      {notification && (
-        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 w-full max-w-md px-3 animate-fadeIn">
-          <div className="bg-white/95 backdrop-blur-md rounded-2xl shadow-2xl border border-slate-200/80 p-4 flex flex-col gap-2">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <span className="text-xl">{notification.type === 'sms' ? '💬' : '✉️'}</span>
-                <span className="text-xs font-bold text-slate-700 tracking-wide uppercase">{notification.title}</span>
-              </div>
-              <button
-                onClick={() => setNotification(null)}
-                className="text-slate-400 hover:text-slate-600 text-xs font-bold p-1 cursor-pointer"
-              >
-                ✕
-              </button>
-            </div>
-            <p className="text-xs sm:text-sm text-slate-700 font-medium leading-snug">{notification.message}</p>
-          </div>
-        </div>
-      )}
-
-      {/* ─── SUCCESS CELEBRATION MODAL ─── */}
+      {/* Success Celebration Modal */}
       {successCelebration && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 animate-fadeIn">
           <div className="bg-white rounded-3xl p-8 max-w-sm w-full text-center shadow-2xl flex flex-col items-center">
             <div className="w-20 h-20 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center text-4xl mb-4 animate-bounce">
               ✓
             </div>
-            <h3 className="text-2xl font-bold text-slate-800">Registration Complete!</h3>
+            <h3 className="text-2xl font-bold text-slate-800">Welcome, {successName}!</h3>
             <p className="text-sm text-slate-500 mt-2 mb-6">
-              Welcome to <span className="text-primary font-bold">Aashmi Tours & Travels</span>. Unlocking exclusive fares...
+              Your account is verified. Unlocking exclusive airline fares...
             </p>
             <div className="w-8 h-8 border-3 border-primary border-t-transparent rounded-full animate-spin" />
           </div>
         </div>
       )}
 
-      {/* ─── MAIN PORTAL CARD ─── */}
-      <div className="w-full max-w-xl relative z-10 my-4">
+      {/* Main Card */}
+      <div className="w-full max-w-lg relative z-10 my-4">
         {/* Brand Header */}
-        <div className="text-center mb-6">
+        <div className="text-center mb-5">
           <div className="inline-flex items-center justify-center p-3 bg-white/10 backdrop-blur-md rounded-2xl border border-white/20 shadow-lg mb-3">
             <img
               src="/aashmi-logo.png"
               alt="Aashmi Tours & Travels"
-              className="h-12 sm:h-14 w-auto object-contain drop-shadow"
+              className="h-11 sm:h-14 w-auto object-contain drop-shadow"
             />
           </div>
-          <h1 className="text-xl sm:text-2xl font-bold text-white tracking-tight drop-shadow-sm font-headline-lg">
-            Travel Concierge Access Portal
+          <h1 className="text-xl sm:text-2xl font-extrabold text-white tracking-tight drop-shadow-sm font-headline-lg">
+            {mode === 'register' ? 'Create Your Account' : 'Welcome Back'}
           </h1>
-          <p className="text-cyan-200/80 text-xs sm:text-sm mt-1">
-            Official Gov-compliant verification for premium airline reservations
+          <p className="text-cyan-200/70 text-xs sm:text-sm mt-1">
+            {mode === 'register'
+              ? 'Register to access exclusive airline fares & concierge services'
+              : 'Sign in to your Aashmi Travels account'}
           </p>
         </div>
 
-        {/* Tab Switcher: Register vs Sign In */}
+        {/* Tab Switcher */}
         <div className="flex bg-black/30 backdrop-blur-md p-1 rounded-2xl border border-white/15 max-w-xs mx-auto mb-5">
           <button
-            onClick={() => setAuthMode('register')}
-            className={`flex-1 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all cursor-pointer ${
-              authMode === 'register'
-                ? 'bg-white text-slate-800 shadow-md'
-                : 'text-white/70 hover:text-white'
+            onClick={() => { setMode('register'); setLoginError(''); }}
+            className={`flex-1 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all cursor-pointer ${
+              mode === 'register' ? 'bg-white text-slate-800 shadow-md' : 'text-white/70 hover:text-white'
             }`}
           >
-            New Registration
+            Register
           </button>
           <button
-            onClick={() => setAuthMode('login')}
-            className={`flex-1 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all cursor-pointer ${
-              authMode === 'login'
-                ? 'bg-white text-slate-800 shadow-md'
-                : 'text-white/70 hover:text-white'
+            onClick={() => { setMode('login'); setRegisterError(''); }}
+            className={`flex-1 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all cursor-pointer ${
+              mode === 'login' ? 'bg-white text-slate-800 shadow-md' : 'text-white/70 hover:text-white'
             }`}
           >
             Sign In
           </button>
         </div>
 
-        {/* Form Container Card */}
-        <div className="bg-white/95 backdrop-blur-2xl rounded-3xl shadow-2xl shadow-black/40 border border-white/40 p-5 sm:p-8">
-          {/* ═════════════════════════════════════════════════════════ */}
-          {/* REGISTRATION MODE                                        */}
-          {/* ═════════════════════════════════════════════════════════ */}
-          {authMode === 'register' && (
-            <div>
-              {/* Steps Progress */}
-              <StepIndicator currentStep={currentStep} steps={stepNames} />
+        {/* Form Card */}
+        <div className="bg-white/95 backdrop-blur-2xl rounded-3xl shadow-2xl shadow-black/40 border border-white/50 p-5 sm:p-7">
 
-              {/* ───────────────────────────────────────────────────── */}
-              {/* STEP 1: IDENTITY VERIFICATION (PAN / AADHAAR)         */}
-              {/* ───────────────────────────────────────────────────── */}
-              {currentStep === 0 && (
-                <div className="space-y-4 animate-fadeIn">
-                  <div className="text-center">
-                    <h2 className="text-lg sm:text-xl font-bold text-slate-800 font-headline-lg">
-                      Step 1: Identity Card Verification
-                    </h2>
-                    <p className="text-xs sm:text-sm text-slate-500 mt-0.5">
-                      Choose PAN Card or Aadhaar Card for traveler authentication
-                    </p>
-                  </div>
+          {/* ═══════════ REGISTER MODE ═══════════ */}
+          {mode === 'register' && (
+            <form onSubmit={handleRegister} className="space-y-4 animate-fadeIn">
+              {/* Name Row */}
+              <div className="grid grid-cols-2 gap-3">
+                <FormInput
+                  label="First Name"
+                  icon="person"
+                  placeholder="e.g. Mohammed"
+                  value={form.firstName}
+                  onChange={(e) => updateForm('firstName', e.target.value)}
+                  error={fieldErrors.firstName}
+                />
+                <FormInput
+                  label="Last Name"
+                  placeholder="e.g. Farseen"
+                  value={form.lastName}
+                  onChange={(e) => updateForm('lastName', e.target.value)}
+                  error={fieldErrors.lastName}
+                />
+              </div>
 
-                  {/* ID Selector Toggle */}
-                  <div className="grid grid-cols-2 gap-2 bg-slate-100 p-1 rounded-xl">
-                    <button
-                      onClick={() => {
-                        if (!idVerified) {
-                          setIdType('PAN');
-                          setIdNumber('');
-                          setIdError('');
-                        }
-                      }}
-                      className={`py-2.5 rounded-lg text-xs sm:text-sm font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
-                        idType === 'PAN'
-                          ? 'bg-white text-primary shadow-sm'
-                          : 'text-slate-500 hover:text-slate-800'
+              {/* Email */}
+              <FormInput
+                label="Email"
+                icon="mail"
+                type="email"
+                placeholder="name@example.com"
+                value={form.email}
+                onChange={(e) => updateForm('email', e.target.value)}
+                error={fieldErrors.email}
+              />
+
+              {/* Mobile */}
+              <FormInput
+                label="Mobile Number"
+                icon="call"
+                type="tel"
+                placeholder="98765 43210"
+                value={form.phone}
+                onChange={(e) => updateForm('phone', e.target.value.replace(/[^\d\s]/g, '').slice(0, 12))}
+                error={fieldErrors.phone}
+              />
+
+              {/* Password Row */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-600 mb-1.5 tracking-wide">Password</label>
+                  <div className="relative">
+                    <span className="absolute left-3.5 top-1/2 -translate-y-1/2 material-symbols-outlined text-[18px] text-slate-400">lock</span>
+                    <input
+                      type={showRegPasswords ? 'text' : 'password'}
+                      placeholder="Min. 6 characters"
+                      value={form.password}
+                      onChange={(e) => updateForm('password', e.target.value)}
+                      className={`w-full pl-10 pr-10 py-2.5 rounded-xl border-2 bg-white text-sm text-slate-800 placeholder:text-slate-300 outline-none transition-all ${
+                        fieldErrors.password ? 'border-red-300 focus:border-red-400 focus:ring-4 focus:ring-red-100' : 'border-slate-200 focus:border-primary focus:ring-4 focus:ring-primary/15'
                       }`}
-                    >
-                      <span>🪪</span> PAN Card
-                    </button>
+                    />
                     <button
-                      onClick={() => {
-                        if (!idVerified) {
-                          setIdType('AADHAAR');
-                          setIdNumber('');
-                          setIdError('');
-                        }
-                      }}
-                      className={`py-2.5 rounded-lg text-xs sm:text-sm font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
-                        idType === 'AADHAAR'
-                          ? 'bg-white text-primary shadow-sm'
-                          : 'text-slate-500 hover:text-slate-800'
+                      type="button"
+                      onClick={() => setShowRegPasswords(!showRegPasswords)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 material-symbols-outlined text-[18px] text-slate-400 hover:text-slate-600 cursor-pointer"
+                    >
+                      {showRegPasswords ? 'visibility_off' : 'visibility'}
+                    </button>
+                  </div>
+                  {fieldErrors.password && <p className="text-[11px] text-red-500 mt-1 font-medium">{fieldErrors.password}</p>}
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-600 mb-1.5 tracking-wide">Confirm Password</label>
+                  <div className="relative">
+                    <input
+                      type={showRegPasswords ? 'text' : 'password'}
+                      placeholder="Re-enter password"
+                      value={form.confirmPassword}
+                      onChange={(e) => updateForm('confirmPassword', e.target.value)}
+                      className={`w-full pl-4 pr-4 py-2.5 rounded-xl border-2 bg-white text-sm text-slate-800 placeholder:text-slate-300 outline-none transition-all ${
+                        fieldErrors.confirmPassword ? 'border-red-300 focus:border-red-400 focus:ring-4 focus:ring-red-100' : 'border-slate-200 focus:border-primary focus:ring-4 focus:ring-primary/15'
                       }`}
-                    >
-                      <span>🆔</span> Aadhaar Card
-                    </button>
-                  </div>
-
-                  {/* Input Field */}
-                  <div>
-                    <div className="flex justify-between items-center mb-1.5">
-                      <label className="text-xs sm:text-sm font-bold text-slate-700">
-                        {idType === 'PAN' ? 'PAN Card Number' : 'Aadhaar Card Number'}
-                      </label>
-                      {idType === 'PAN' && idNumber.length >= 4 && (
-                        <span className="text-[11px] font-semibold text-primary bg-primary-light px-2 py-0.5 rounded-full">
-                          {getPanEntity(idNumber)}
-                        </span>
-                      )}
-                    </div>
-
-                    <input
-                      type="text"
-                      value={idNumber}
-                      onChange={(e) => {
-                        setIdError('');
-                        if (idType === 'PAN') {
-                          setIdNumber(e.target.value.toUpperCase().slice(0, 10));
-                        } else {
-                          const digitsOnly = e.target.value.replace(/\D/g, '').slice(0, 12);
-                          const formatted = digitsOnly.replace(/(\d{4})(?=\d)/g, '$1 ');
-                          setIdNumber(formatted);
-                        }
-                      }}
-                      placeholder={idType === 'PAN' ? 'e.g. ABCDE1234F' : 'e.g. 5432 1098 7654'}
-                      disabled={idVerifying || idVerified}
-                      className="w-full px-4 py-3 rounded-xl border-2 border-slate-200 bg-white font-mono text-base sm:text-lg tracking-wider text-slate-800 placeholder:text-slate-300 focus:border-primary focus:ring-4 focus:ring-primary/15 outline-none transition-all"
                     />
-
-                    <div className="flex justify-between items-center mt-1 text-[11px] text-slate-400">
-                      <span>
-                        {idType === 'PAN'
-                          ? 'Standard 10-character Tax ID format'
-                          : '12-digit UIDAI unique identity number'}
-                      </span>
-                      <span className="font-mono">
-                        {idType === 'PAN' ? `${idNumber.length}/10` : `${idNumber.replace(/\s/g, '').length}/12`}
-                      </span>
-                    </div>
                   </div>
+                  {fieldErrors.confirmPassword && <p className="text-[11px] text-red-500 mt-1 font-medium">{fieldErrors.confirmPassword}</p>}
+                </div>
+              </div>
 
-                  {/* Error Notification */}
-                  {idError && (
-                    <div className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl text-xs sm:text-sm flex items-start gap-2">
-                      <span className="text-base leading-none">⚠️</span>
-                      <span>{idError}</span>
-                    </div>
-                  )}
+              {/* Address Divider */}
+              <div className="relative pt-2">
+                <div className="absolute inset-0 flex items-center pt-2">
+                  <div className="w-full border-t border-slate-200/80" />
+                </div>
+                <div className="relative flex justify-center text-xs">
+                  <span className="bg-white/95 px-2.5 text-slate-400 font-bold tracking-wider uppercase text-[10px]">
+                    Address Details
+                  </span>
+                </div>
+              </div>
 
-                  {/* Verifying Animation */}
-                  {idVerifying && (
-                    <div className="p-4 bg-cyan-50 border border-cyan-200 rounded-2xl text-center space-y-2">
-                      <div className="w-8 h-8 border-3 border-primary border-t-transparent rounded-full animate-spin mx-auto" />
-                      <p className="text-xs font-bold text-primary animate-pulse">{idVerifyStage}</p>
-                    </div>
-                  )}
+              {/* Address */}
+              <FormInput
+                label="Address"
+                icon="home"
+                placeholder="House No, Street, Area"
+                value={form.address}
+                onChange={(e) => updateForm('address', e.target.value)}
+                error={fieldErrors.address}
+              />
 
-                  {/* Success State */}
-                  {idVerified && (
-                    <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-2xl flex items-center gap-3 text-emerald-800">
-                      <div className="w-8 h-8 bg-emerald-500 text-white rounded-full flex items-center justify-center font-bold">
-                        ✓
-                      </div>
-                      <div>
-                        <p className="text-xs font-bold uppercase tracking-wider">
-                          {idType} Verified Successfully
-                        </p>
-                        <p className="text-xs text-emerald-600 font-mono mt-0.5">
-                          {idType === 'PAN' ? idNumber : `XXXXXXXX${idNumber.replace(/\s/g, '').slice(-4)}`}
-                        </p>
-                      </div>
-                    </div>
-                  )}
+              {/* City + State */}
+              <div className="grid grid-cols-2 gap-3">
+                <FormInput
+                  label="City"
+                  placeholder="e.g. Kozhikode"
+                  value={form.city}
+                  onChange={(e) => updateForm('city', e.target.value)}
+                  error={fieldErrors.city}
+                />
+                <FormInput
+                  label="State"
+                  placeholder="e.g. Kerala"
+                  value={form.state}
+                  onChange={(e) => updateForm('state', e.target.value)}
+                  error={fieldErrors.state}
+                />
+              </div>
 
-                  {/* Action Button */}
-                  {!idVerified && !idVerifying && (
-                    <button
-                      onClick={handleVerifyId}
-                      disabled={!idNumber}
-                      className="w-full py-3.5 bg-primary hover:bg-primary-hover disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold rounded-xl shadow-lg shadow-primary/25 hover:shadow-primary/35 transition-all text-sm sm:text-base cursor-pointer"
-                    >
-                      Verify {idType === 'PAN' ? 'PAN Card' : 'Aadhaar'} & Continue
-                    </button>
-                  )}
+              {/* Country + PIN Code */}
+              <div className="grid grid-cols-2 gap-3">
+                <FormInput
+                  label="Country"
+                  icon="public"
+                  placeholder="e.g. India"
+                  value={form.country}
+                  onChange={(e) => updateForm('country', e.target.value)}
+                  error={fieldErrors.country}
+                />
+                <FormInput
+                  label="PIN Code"
+                  placeholder="e.g. 673001"
+                  value={form.pinCode}
+                  onChange={(e) => updateForm('pinCode', e.target.value.replace(/\D/g, '').slice(0, 6))}
+                  error={fieldErrors.pinCode}
+                />
+              </div>
+
+              {/* Register Error */}
+              {registerError && (
+                <div className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl text-xs flex items-start gap-2 animate-fadeIn">
+                  <span className="text-sm leading-none">⚠️</span>
+                  <span>{registerError}</span>
                 </div>
               )}
 
-              {/* ───────────────────────────────────────────────────── */}
-              {/* STEP 2: EMAIL ADDRESS & REAL SUPABASE EMAIL OTP       */}
-              {/* ───────────────────────────────────────────────────── */}
-              {currentStep === 1 && (
-                <div className="space-y-4 animate-fadeIn">
-                  <div className="text-center">
-                    <h2 className="text-lg sm:text-xl font-bold text-slate-800 font-headline-lg">
-                      Step 2: Email OTP Verification
-                    </h2>
-                    <p className="text-xs sm:text-sm text-slate-500 mt-0.5">
-                      Verify your official email address via Supabase Auth OTP
-                    </p>
-                  </div>
+              {/* Submit Button */}
+              <button
+                type="submit"
+                disabled={registerLoading}
+                className="w-full py-3.5 bg-primary hover:bg-primary-hover disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold rounded-xl shadow-lg shadow-primary/25 hover:shadow-primary/35 transition-all text-sm cursor-pointer flex items-center justify-center gap-2"
+              >
+                {registerLoading ? (
+                  <>
+                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                    <span>Creating Account...</span>
+                  </>
+                ) : (
+                  <>
+                    <span className="material-symbols-outlined text-[18px]">how_to_reg</span>
+                    <span>Create Account</span>
+                  </>
+                )}
+              </button>
 
-                  {/* Email Input */}
-                  <div>
-                    <label className="block text-xs sm:text-sm font-bold text-slate-700 mb-1.5">
-                      Email Address
-                    </label>
-                    <input
-                      type="email"
-                      value={email}
-                      onChange={(e) => {
-                        setEmailError('');
-                        setEmail(e.target.value);
-                      }}
-                      disabled={emailSent || emailVerified}
-                      placeholder="e.g. yourname@gmail.com"
-                      className="w-full px-4 py-3 rounded-xl border-2 border-slate-200 bg-white text-base text-slate-800 placeholder:text-slate-300 focus:border-primary focus:ring-4 focus:ring-primary/15 outline-none transition-all disabled:bg-slate-50"
-                    />
-                  </div>
-
-                  {/* Error Notification */}
-                  {emailError && (
-                    <div className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl text-xs sm:text-sm flex items-start gap-2">
-                      <span className="text-base leading-none">⚠️</span>
-                      <span>{emailError}</span>
-                    </div>
-                  )}
-
-                  {/* If not sent */}
-                  {!emailSent && (
-                    <button
-                      onClick={handleSendEmailOtp}
-                      disabled={emailLoading || !email}
-                      className="w-full py-3.5 bg-primary hover:bg-primary-hover disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold rounded-xl shadow-lg shadow-primary/25 hover:shadow-primary/35 transition-all text-sm sm:text-base cursor-pointer"
-                    >
-                      {emailLoading ? 'Sending Email OTP Code...' : 'Send Email OTP Code'}
-                    </button>
-                  )}
-
-                  {/* If sent */}
-                  {emailSent && !emailVerified && (
-                    <div className="pt-2 space-y-3">
-                      <div className="flex items-center justify-between text-xs text-slate-500">
-                        <span>Enter 6-Digit Code sent to {email}</span>
-                        <button
-                          onClick={() => {
-                            setEmailSent(false);
-                            setEmailOtp('');
-                            setEmailError('');
-                          }}
-                          className="text-primary font-bold hover:underline cursor-pointer"
-                        >
-                          Change Email
-                        </button>
-                      </div>
-
-                      <OtpInput
-                        value={emailOtp}
-                        onChange={setEmailOtp}
-                        disabled={emailVerified || emailLoading}
-                      />
-
-                      <button
-                        onClick={handleVerifyEmailOtp}
-                        disabled={emailOtp.length !== 6 || emailLoading}
-                        className="w-full py-3.5 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold rounded-xl shadow-lg shadow-emerald-500/25 transition-all text-sm sm:text-base cursor-pointer"
-                      >
-                        {emailLoading ? 'Verifying Email OTP...' : 'Verify Email OTP'}
-                      </button>
-
-                      <div className="flex justify-between items-center text-xs text-slate-500 pt-1">
-                        {emailTimer > 0 ? (
-                          <span>Resend Code in <strong className="text-primary">{emailTimer}s</strong></span>
-                        ) : (
-                          <button
-                            onClick={handleSendEmailOtp}
-                            disabled={emailLoading}
-                            className="text-primary font-bold hover:underline cursor-pointer"
-                          >
-                            Resend Email OTP
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Verified State */}
-                  {emailVerified && (
-                    <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-2xl flex items-center gap-3 text-emerald-800">
-                      <div className="w-8 h-8 bg-emerald-500 text-white rounded-full flex items-center justify-center font-bold">
-                        ✓
-                      </div>
-                      <div>
-                        <p className="text-xs font-bold uppercase tracking-wider">Email Verified</p>
-                        <p className="text-xs text-emerald-600 mt-0.5">{email}</p>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Back step */}
-                  {!emailVerified && (
-                    <button
-                      onClick={() => setCurrentStep(0)}
-                      className="text-xs text-slate-400 hover:text-slate-600 block mx-auto pt-2 cursor-pointer"
-                    >
-                      ← Back to ID Verification
-                    </button>
-                  )}
-                </div>
-              )}
-
-              {/* ───────────────────────────────────────────────────── */}
-              {/* STEP 3: PERSONAL PROFILE & FINAL ACCESS               */}
-              {/* ───────────────────────────────────────────────────── */}
-              {currentStep === 2 && (
-                <div className="space-y-4 animate-fadeIn">
-                  <div className="text-center">
-                    <h2 className="text-lg sm:text-xl font-bold text-slate-800 font-headline-lg">
-                      Step 3: Complete Your Traveler Profile
-                    </h2>
-                    <p className="text-xs sm:text-sm text-slate-500 mt-0.5">
-                      Enter your official details to finalize verification
-                    </p>
-                  </div>
-
-                  {/* Verified Badges Summary */}
-                  <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-2xl space-y-2">
-                    <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
-                      Verified Credentials Summary
-                    </div>
-                    <div className="grid grid-cols-2 gap-3">
-                      <div className="bg-white p-2.5 rounded-xl border border-slate-100 flex flex-col items-center text-center shadow-sm">
-                        <span className="text-lg">🪪</span>
-                        <span className="text-xs font-bold text-slate-700 mt-1">{idType} Card</span>
-                        <span className="text-[11px] text-emerald-600 font-bold">Verified ✓</span>
-                      </div>
-                      <div className="bg-white p-2.5 rounded-xl border border-slate-100 flex flex-col items-center text-center shadow-sm">
-                        <span className="text-lg">✉️</span>
-                        <span className="text-xs font-bold text-slate-700 mt-1">Official Email</span>
-                        <span className="text-[11px] text-emerald-600 font-bold">Verified ✓</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Full Name Input */}
-                  <div>
-                    <label className="block text-xs sm:text-sm font-bold text-slate-700 mb-1.5">
-                      Full Legal Name (as on Passport / ID)
-                    </label>
-                    <input
-                      type="text"
-                      value={fullName}
-                      onChange={(e) => {
-                        setSubmitError('');
-                        setFullName(e.target.value);
-                      }}
-                      placeholder="e.g. Mohammed Farseen"
-                      className="w-full px-4 py-3 rounded-xl border-2 border-slate-200 bg-white text-base text-slate-800 placeholder:text-slate-300 focus:border-primary focus:ring-4 focus:ring-primary/15 outline-none transition-all"
-                    />
-                  </div>
-
-                  {/* Contact Phone (Optional / Standard field) */}
-                  <div>
-                    <label className="block text-xs sm:text-sm font-bold text-slate-700 mb-1.5">
-                      Contact Mobile Number (For Flight Itinerary SMS / WhatsApp)
-                    </label>
-                    <div className="flex">
-                      <span className="inline-flex items-center px-3.5 rounded-l-xl border-2 border-r-0 border-slate-200 bg-slate-50 text-slate-700 text-sm font-bold">
-                        🇮🇳 +91
-                      </span>
-                      <input
-                        type="tel"
-                        value={phone}
-                        onChange={(e) => setPhone(e.target.value.replace(/\D/g, '').slice(0, 10))}
-                        placeholder="98765 43210 (Optional)"
-                        className="flex-1 px-4 py-3 rounded-r-xl border-2 border-slate-200 bg-white font-mono text-base text-slate-800 placeholder:text-slate-300 focus:border-primary focus:ring-4 focus:ring-primary/15 outline-none transition-all"
-                      />
-                    </div>
-                  </div>
-
-                  {/* Home Hub / City */}
-                  <div>
-                    <label className="block text-xs sm:text-sm font-bold text-slate-700 mb-1.5">
-                      Primary Departure Hub / City
-                    </label>
-                    <input
-                      type="text"
-                      value={homeCity}
-                      onChange={(e) => setHomeCity(e.target.value)}
-                      placeholder="e.g. Calicut (CCJ) / Cochin (COK) / Dubai"
-                      className="w-full px-4 py-3 rounded-xl border-2 border-slate-200 bg-white text-base text-slate-800 placeholder:text-slate-300 focus:border-primary focus:ring-4 focus:ring-primary/15 outline-none transition-all"
-                    />
-                  </div>
-
-                  {/* Terms checkbox */}
-                  <label className="flex items-start gap-2.5 cursor-pointer pt-1">
-                    <input
-                      type="checkbox"
-                      checked={agreeTerms}
-                      onChange={(e) => setAgreeTerms(e.target.checked)}
-                      className="mt-0.5 w-4 h-4 rounded text-primary focus:ring-primary/20 accent-primary cursor-pointer"
-                    />
-                    <span className="text-xs text-slate-500 leading-normal">
-                      I confirm that the verified PAN/Aadhaar and contact details belong to me and agree to Aashmi Tours & Travels terms of service.
-                    </span>
-                  </label>
-
-                  {/* Error Notification */}
-                  {submitError && (
-                    <div className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl text-xs sm:text-sm flex items-start gap-2">
-                      <span className="text-base leading-none">⚠️</span>
-                      <span>{submitError}</span>
-                    </div>
-                  )}
-
-                  {/* Submit Button */}
-                  <button
-                    onClick={handleSubmitRegistration}
-                    disabled={submitting}
-                    className="w-full py-4 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold rounded-xl shadow-xl shadow-emerald-500/30 transition-all text-base cursor-pointer flex items-center justify-center gap-2"
-                  >
-                    {submitting ? (
-                      <>
-                        <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                        <span>Activating Verified Membership...</span>
-                      </>
-                    ) : (
-                      <>
-                        <span>🚀 Complete Registration & Unlock Website</span>
-                      </>
-                    )}
-                  </button>
-                </div>
-              )}
-            </div>
+              {/* Switch to login */}
+              <p className="text-center text-xs text-slate-400 pt-1">
+                Already have an account?{' '}
+                <button
+                  type="button"
+                  onClick={() => setMode('login')}
+                  className="text-primary font-bold hover:underline cursor-pointer"
+                >
+                  Sign In
+                </button>
+              </p>
+            </form>
           )}
 
-          {/* ═════════════════════════════════════════════════════════ */}
-          {/* SIGN IN MODE (FOR EXISTING REGISTERED USERS - EMAIL ONLY)  */}
-          {/* ═════════════════════════════════════════════════════════ */}
-          {authMode === 'login' && (
-            <div className="space-y-4 animate-fadeIn">
-              <div className="text-center">
-                <h2 className="text-lg sm:text-xl font-bold text-slate-800 font-headline-lg">
-                  Sign In to Your Aashmi Account
-                </h2>
-                <p className="text-xs sm:text-sm text-slate-500 mt-0.5">
-                  Enter your registered email address to receive your sign-in code
+          {/* ═══════════ LOGIN MODE ═══════════ */}
+          {mode === 'login' && (
+            <div className="space-y-5 animate-fadeIn">
+              {/* Google Sign In (Only for registered users) */}
+              <div className="space-y-3">
+                <button
+                  onClick={handleGoogleLogin}
+                  disabled={googleLoading}
+                  className="w-full py-3 px-4 bg-white hover:bg-slate-50 active:bg-slate-100 text-slate-700 font-bold text-sm rounded-2xl border-2 border-slate-200/90 shadow-md hover:shadow-lg transition-all duration-200 flex items-center justify-center gap-3 group cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
+                >
+                  {googleLoading ? (
+                    <div className="w-5 h-5 border-2 border-slate-600 border-t-transparent rounded-full animate-spin" />
+                  ) : (
+                    <GoogleIcon />
+                  )}
+                  <span className="group-hover:text-slate-900 transition-colors">
+                    {googleLoading ? 'Connecting to Google...' : 'Sign in with Google'}
+                  </span>
+                </button>
+                <p className="text-center text-[11px] text-slate-400">
+                  Only works if you've already registered with the same email
                 </p>
               </div>
 
-              {!loginOtpSent ? (
-                <>
-                  <div>
-                    <label className="block text-xs sm:text-sm font-bold text-slate-700 mb-1.5">
-                      Registered Email Address
-                    </label>
+              {/* Divider */}
+              <div className="relative">
+                <div className="absolute inset-0 flex items-center">
+                  <div className="w-full border-t border-slate-200" />
+                </div>
+                <div className="relative flex justify-center text-xs uppercase">
+                  <span className="bg-white/95 px-3 text-slate-400 font-bold tracking-wider">
+                    or sign in with email
+                  </span>
+                </div>
+              </div>
+
+              {/* Email + Password Login Form */}
+              <form onSubmit={handleLogin} className="space-y-4">
+                <FormInput
+                  label="Email Address"
+                  icon="mail"
+                  type="email"
+                  placeholder="name@example.com"
+                  value={loginEmail}
+                  onChange={(e) => { setLoginError(''); setLoginEmail(e.target.value); }}
+                />
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-600 mb-1.5 tracking-wide">
+                    Password
+                  </label>
+                  <div className="relative">
+                    <span className="absolute left-3.5 top-1/2 -translate-y-1/2 material-symbols-outlined text-[18px] text-slate-400">lock</span>
                     <input
-                      type="email"
-                      value={loginEmail}
-                      onChange={(e) => {
-                        setLoginError('');
-                        setLoginEmail(e.target.value);
-                      }}
-                      placeholder="e.g. user@example.com"
-                      className="w-full px-4 py-3 rounded-xl border-2 border-slate-200 bg-white text-base text-slate-800 placeholder:text-slate-300 focus:border-primary focus:ring-4 focus:ring-primary/15 outline-none transition-all"
+                      type={showPassword ? 'text' : 'password'}
+                      placeholder="Enter your password"
+                      value={loginPassword}
+                      onChange={(e) => { setLoginError(''); setLoginPassword(e.target.value); }}
+                      className="w-full pl-10 pr-10 py-2.5 rounded-xl border-2 border-slate-200 bg-white text-sm text-slate-800 placeholder:text-slate-300 focus:border-primary focus:ring-4 focus:ring-primary/15 outline-none transition-all"
                     />
-                  </div>
-
-                  {loginError && (
-                    <div className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl text-xs sm:text-sm flex items-start gap-2">
-                      <span className="text-base leading-none">⚠️</span>
-                      <span>{loginError}</span>
-                    </div>
-                  )}
-
-                  <button
-                    onClick={handleLoginSendOtp}
-                    disabled={loginLoading || !loginEmail.trim()}
-                    className="w-full py-3.5 bg-primary hover:bg-primary-hover disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold rounded-xl shadow-lg shadow-primary/25 transition-all text-sm sm:text-base cursor-pointer"
-                  >
-                    {loginLoading ? 'Sending Login OTP...' : 'Send Email Sign In OTP'}
-                  </button>
-
-                  <p className="text-center text-xs text-slate-400 pt-2">
-                    Don't have a verified account yet?{' '}
                     <button
-                      onClick={() => setAuthMode('register')}
-                      className="text-primary font-bold hover:underline cursor-pointer"
+                      type="button"
+                      onClick={() => setShowPassword(!showPassword)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 material-symbols-outlined text-[18px] text-slate-400 hover:text-slate-600 cursor-pointer"
                     >
-                      Register Now
+                      {showPassword ? 'visibility_off' : 'visibility'}
                     </button>
-                  </p>
-                </>
-              ) : (
-                <div className="space-y-4">
-                  <div className="text-center">
-                    <p className="text-xs text-slate-500">
-                      Enter the 6-digit login OTP code sent to:
-                    </p>
-                    <p className="text-sm font-bold text-slate-800 font-mono mt-0.5">
-                      {loginEmail}
-                    </p>
-                  </div>
-
-                  <OtpInput
-                    value={loginOtpInput}
-                    onChange={setLoginOtpInput}
-                    disabled={loginLoading}
-                  />
-
-                  {loginError && (
-                    <div className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl text-xs sm:text-sm flex items-start gap-2">
-                      <span className="text-base leading-none">⚠️</span>
-                      <span>{loginError}</span>
-                    </div>
-                  )}
-
-                  <button
-                    onClick={handleLoginVerify}
-                    disabled={loginOtpInput.length !== 6 || loginLoading}
-                    className="w-full py-3.5 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold rounded-xl shadow-lg shadow-emerald-500/25 transition-all text-sm sm:text-base cursor-pointer"
-                  >
-                    {loginLoading ? 'Verifying OTP...' : 'Verify & Sign In'}
-                  </button>
-
-                  <div className="flex justify-between items-center text-xs text-slate-400">
-                    <button
-                      onClick={() => {
-                        setLoginOtpSent(false);
-                        setLoginOtpInput('');
-                        setLoginError('');
-                      }}
-                      className="text-slate-500 hover:text-slate-800 cursor-pointer"
-                    >
-                      ← Back
-                    </button>
-
-                    {loginTimer > 0 ? (
-                      <span>Resend in <strong className="text-primary">{loginTimer}s</strong></span>
-                    ) : (
-                      <button
-                        onClick={handleLoginSendOtp}
-                        disabled={loginLoading}
-                        className="text-primary font-bold hover:underline cursor-pointer"
-                      >
-                        Resend Login OTP
-                      </button>
-                    )}
                   </div>
                 </div>
-              )}
+
+                {/* Login Error */}
+                {loginError && (
+                  <div className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl text-xs flex items-start gap-2 animate-fadeIn">
+                    <span className="text-sm leading-none">⚠️</span>
+                    <span>{loginError}</span>
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={loginLoading}
+                  className="w-full py-3.5 bg-primary hover:bg-primary-hover disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold rounded-xl shadow-lg shadow-primary/25 hover:shadow-primary/35 transition-all text-sm cursor-pointer flex items-center justify-center gap-2"
+                >
+                  {loginLoading ? (
+                    <>
+                      <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                      <span>Signing In...</span>
+                    </>
+                  ) : (
+                    <>
+                      <span className="material-symbols-outlined text-[18px]">login</span>
+                      <span>Sign In</span>
+                    </>
+                  )}
+                </button>
+              </form>
+
+              {/* Switch to register */}
+              <p className="text-center text-xs text-slate-400">
+                Don't have an account?{' '}
+                <button
+                  onClick={() => setMode('register')}
+                  className="text-primary font-bold hover:underline cursor-pointer"
+                >
+                  Register Now
+                </button>
+              </p>
             </div>
           )}
         </div>
 
-        {/* Footer info */}
+        {/* Footer */}
         <div className="text-center text-cyan-100/60 text-xs mt-5 space-y-1">
-          <p>🔒 256-Bit SSL Encrypted Verification • UIDAI & NSDL Standards</p>
+          <p>🔒 256-Bit SSL Encrypted • Official Airline Partner</p>
           <p>© {new Date().getFullYear()} Aashmi Tours & Travels Pvt. Ltd.</p>
         </div>
       </div>
